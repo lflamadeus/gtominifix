@@ -1,0 +1,12 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "com.lai.gtominifix.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "TravelHandlerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}

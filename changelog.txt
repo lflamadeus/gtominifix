@@ -1,0 +1,208 @@
+更新日志
+========
+
+1.0.3 - 2026-09-21
+------------------
+- 新增：Functional Storage 一格 / 两格 / 四格抽屉上的「Ctrl + Shift + 左键 = 尽量填满背包」。
+  它自带的左键单击取 1 个、Shift + 左键取一整格；这个组合键是一次取到装不下为止。
+  填的是主背包 27 格 + 快捷栏 9 格（盔甲 / 副手不动），先填已有的同类堆、再占空格。
+  背包装不下时这次点击什么都不做，不会像原版那样取出 1 个丢在地上。
+  只对普通物品抽屉生效（含镶框版），压缩抽屉 / 末影抽屉 / 流体抽屉不接管。
+  配置项 drawer.fillEnabled，默认开。
+- 定位（全部经字节码 / 源码核实，jar 为 functionalstorage-1.20.1-1.2.13.jar）：
+  * 取物入口在 FunctionalStorage 的构造器里注册的 PlayerInteractEvent.LeftClickBlock
+    （Titanium 的 EventManager.forge(...)，优先级 **NORMAL**），
+    命中抽屉时调 ControllableDrawerTile#onClicked，而真正实现只在
+    ItemControllableDrawerTile 里，第一行是 if (isServer() && slot != -1 && removeTicks == 0)，
+    然后把 removeTicks 置 3、做一次 32 格射线、确认命中面 == 抽屉正面，
+    再 extractItem(shift ? 整格数量 : 1) 交给 ItemHandlerHelper.giveItemToPlayer。
+    所以「按住 Shift 长按左键固定频率一组组往外取」其实是客户端每 tick 重发一次
+    START_DESTROY_BLOCK、服务端每 tick 被事件挡一次，再被 removeTicks 限成约 3 tick 一次。
+  * **关键约束：客户端取消 LeftClickBlock 拦不住这次点击。**
+    Forge 补丁后的 MultiPlayerGameMode#startDestroyBlock 是这样的（源码核实）：
+      LeftClickBlock event = ForgeHooks.onLeftClickBlock(...);
+      startPrediction(level, seq -> { ...; packet = new ServerboundPlayerActionPacket(START_DESTROY_BLOCK, ...);
+                                     if (event.getUseItem() == DENY) return packet; ... });
+    取消只让客户端不置 isDestroying、不画破坏裂纹，**packet 照样返回、照样发出**。
+    服务端 ServerPlayerGameMode#handleBlockBreakAction 只认服务端那次 post 的 isCanceled()。
+    第一版设计想「客户端取消就完事」，按这条直接推翻。
+  * 于是改成「客户端报意图 + 服务端在真实点击上动手」：客户端发一个小包说明
+    「我按 Ctrl+Shift 点了这个坐标」，服务端记成一条一次性请求；
+    同一个坐标的 LeftClickBlock 在服务端 post 上来时，以 HIGHEST 抢先执行 ——
+    先 setCanceled(true) 把 Functional Storage 的「取 1 个 / 取一组」整个挡在后面
+    （Forge 分发给可取消事件时，被 cancel 之后没标 receiveCanceled 的 handler 根本不会被调用），
+    再自己做批量填充。顺序有保证：两个包由客户端在同一个 tick 内按「事件回调 → startPrediction」
+    的先后发出，走同一条连接按序到达。
+  * 存储没走反射：DrawerTile#getCapability 对 ForgeCapabilities.ITEM_HANDLER
+    直接返回它自己那个 BigInventoryHandler（字节码核实），方向、是否接了存储控制器都不影响。
+    只有「玩家点的是哪一格」必须问 Functional Storage 自己 —— Drawer#getHit 做的是
+    「从眼睛打 32 格射线，再和该朝向的子碰撞箱逐个求交」，两格 / 四格抽屉的格子划分完全由它决定，
+    自己重写一份迟早和它的 CACHED_SHAPES 漂移。这一处走反射（见下）。
+  * 只认 DrawerBlock，不认 Drawer 接口：实现该接口的还有 CompactingDrawerBlock、
+    EnderDrawerBlock、FluidDrawerBlock（都不是 DrawerBlock 的子类），
+    它们的「格子」语义和普通抽屉不是一回事。FramedDrawerBlock 是 DrawerBlock 的子类，跟着一起生效。
+  * 背包容量：Inventory#getContainerSize() 返回的是 41（36 + 盔甲 4 + 副手 1），
+    直接当上界会把盔甲槽也算进去，所以固定用 36；
+    Inventory 没有覆写 getMaxStackSize()，继承 Container 的默认值 64（字节码核实 bipush 64），
+    代码里照样读它而不是写死。
+- 说明：Functional Storage 是可选依赖，全部走反射（它是模组类，Forge 只重映射 Minecraft 的类，
+  类名 / 方法名在生产环境不变），没装时那块功能整体关闭、模组其余部分照常加载。
+  静态初始化里连 LinkageError 一起吞掉 —— 装了 Functional Storage 但版本对不上时
+  （类在、方法签名对不上），也只记一行日志把功能关掉，不会让 NoClassDefFoundError 冒出去崩游戏。
+  mods.toml 里声明为 mandatory=false + ordering=AFTER。
+- 取舍：为了拦住 Functional Storage 自己的「取 1 个 / 取一组」，服务端那次 LeftClickBlock
+  是在 HIGHEST 上被本模组取消的，因此**同一事件上排在后面的 handler 也看不到这次点击**。
+  影响范围限于「玩家按着 Ctrl + Shift 点了抽屉」这一种情况 —— 那种情况下本来也不产生破坏，
+  但确实会盖掉靠 LeftClickBlock 做拦截的防护类模组。要放开只能降优先级，
+  而降了优先级 Functional Storage 就会先取走东西，功能不成立，所以这个代价是必须付的。
+  不按 Ctrl + Shift 时本模组一个字节都不碰，其它场景一律原样。
+- 调整：/gtominifix config 的输出按功能块拆成三行（teleport / crate / drawer），
+  drawer 那行的 FunctionalStorage 状态取自 FunctionalStorageCompat.isAvailable()，
+  也就是反射解析的结果 —— 比查 ModList 更准，能区分「没装」和「装了但版本对不上」。
+- 修正（自查发现）：DrawerFill 忘了注册到事件总线。DrawerShortcuts 挂在
+  @Mod.EventBusSubscriber(Dist.CLIENT) 上会自动注册，但服务端那个 DrawerFill 是手动注册的，
+  漏掉一行 GtoMiniFix 里的 MinecraftForge.EVENT_BUS.register(DrawerFill.class) 之后，
+  表现会是「按了 Ctrl+Shift 和普通点击一模一样、日志一个字都没有」——
+  正是最容易被误判成「功能没生效」的那种症状。已补上，并在启动日志里
+  加了 Functional Storage 的在场情况 + 反射解析失败时的 warn。
+- 修正：ModNetwork.PROTOCOL_VERSION 从 "1" 推到 "2"。原注释写「只是新增消息不用动它」是错的 ——
+  消息靠 registerMessage 的下标寻址，新消息占的是旧版本没有的下标，
+  混装时服务端收到它会找不到处理器、在连接层报错；推版本号能让这种混装被版本校验干净地拦下来。
+
+1.0.2 - 2026-09-21
+------------------
+- 模组改名：travelfix -> gtominifix（显示名「GTO 迷你修复」），版本 1.0.2。
+  代码按功能分成三块，彼此不互相引用：teleport（旅行手杖落点）、crate（板条箱快捷键）、
+  network（客户端 -> 服务端的小包）；配置也按 teleport / crate 分组。
+  调试命令从 /travelfix 改为 /gtominifix（子命令 probe、config）。
+- 新增：在 GTO 的板条箱（青铜板条箱、钢板条箱等）界面上补回「Ctrl + Shift + 左键 =
+  同类物品全部转移」。（进游戏实测后把空格那条改成了默认不接管，见下。）
+- 定位（实测结论，已推翻第一版的分析）：这两个快捷键不是原版功能，来自整合包里的
+  Inventory Essentials（bulk_transfer / bulk_transfer_all）。它在 LDLib 界面上
+  **两条路径表现不一样**：
+  * bulkTransferAll（空格）被 ServerSupportedInventoryControls 覆写成**服务端**实现
+    （发网络包让服务端搬），绕开了客户端的 quickMove 路径 —— 实测在板条箱上本来就能用。
+    所以最初「hoveredSlot 为 null 导致 IE 失效」的推测是错的，那个字段是好的。
+  * bulkTransferByType（Ctrl + Shift）只有**客户端**实现，靠 clicked(..., QUICK_MOVE)
+    一格一格搬，正好撞上 LDLib quickMoveStack 的每 tick 转移限量：
+    moved + transferredPerTick.get(level) > stack.getMaxStackSize() 时**整次作废**。
+    第一次搬满 64 个就把计数顶到上限，之后每次都作废 ——
+    表现就是「只搬得动点击的那一组」，与实测完全吻合。
+- 修复（关键，实测才暴露）：本模组的事件处理器会被 Inventory Essentials 整个跳过。
+  Forge 分发可取消事件时，一旦某个 handler 把事件 cancel，后面没标 receiveCanceled
+  的 handler 就**不会再被调用**。IE 的 Ctrl+Shift / 空格都在
+  ScreenEvent.MouseButtonPressed.Pre 上处理并 cancel（balm 的 ForgeBalmClientEvents
+  把该事件桥接成 ScreenMouseEvent.Click.Pre），而 IE 注册在前 ——
+  于是本模组连 handler 第一行都执行不到，表现成「按了完全没反应、聊天栏一个字都没有」。
+  修法：给 @SubscribeEvent 加 priority = EventPriority.HIGHEST 抢到最前面执行，
+  再自己 cancel，顺手把 IE 挡在后面。
+- 策略调整（推翻前一版的结论）：两个操作都由本模组接管。
+  最初想让 IE 处理空格那条（它走服务端实现），但实测它在板条箱上只有
+  「从板条箱往背包搬」能用，「背包往板条箱放」只零星搬几格甚至一格，
+  所以 crate.takeOverBulkAll 默认改成 true。
+  接管后的语义：鼠标停在背包上只搬主背包 27 格、不动快捷栏 9 格；停在容器上搬容器全部。
+- 说明：定位过程中曾加过分层诊断输出（把「Forge 最底层鼠标输入 / 本模组 Pre 处理器 /
+  Post 阶段 / Ctrl·Shift·空格 的按键事件」四层打到聊天栏，用来区分「点击没到游戏」
+  「被别的模组 cancel」「本模组自己 cancel」三种完全不同的情况）。
+  问题定位并验证通过后已**全部移除**：正式版不做任何聊天栏输出，也没有调试开关。
+- 性能：见 README「性能开销」一节。结论是普通点击只多几次字段读取 + 一次 instanceof；
+  批量转移只在按键那一下跑一次，且有两道上限（最多处理 2048 格、连续 8 格搬不动就提前结束）。
+- 实现要点一：定位鼠标下的槽位走 LDLib 自己的 widget 树
+  （mainGroup.getHoverElement(mouseX, mouseY)），和 LDLib 判断「鼠标在哪个 widget 上」
+  同源，滚动容器里的坐标换算也由 LDLib 负责。滚到哪一段都能对上，和玩家看到的画面一致。
+  修饰键统一用 InputConstants.isKeyDown 查询（Ctrl/Shift/空格同一套），
+  不用 Screen#hasControlDown()/hasShiftDown()，避免那两个方法的语义在版本间漂移。
+- 实现要点二：批量转移没有走 menu.clicked(..., QUICK_MOVE, ...)。LDLib 的
+  ModularUIContainer#quickMoveStack 里有一道每 tick 转移限量：
+  moved + transferredPerTick.get(level) > stack.getMaxStackSize() 时整次作废、一个都不搬。
+  玩家手动连按 shift + 点击都会被它卡住，批量转移走这条路必然大面积失败。
+  改为在服务端按原版 moveItemStackTo 的语义直接搬 ItemStack：
+  先填满已有的同类堆，再占用空格，全程遵守 Slot#mayPlace 和槽位堆叠上限。
+- 实现要点三：客户端只发「意图」（界面 id + 槽位下标 + 模式），真正的判定在服务端
+  用玩家真实打开着的那个菜单重做一遍：界面 id 对不上、下标越界、槽位不可用一律返回。
+- 实现要点四：容量上限用无参 Slot#getMaxStackSize()，不用带 ItemStack 的重载。
+  LDLib 的 WidgetSlotItemTransfer 把带参版本实现成「探测式」的：先把槽位清空、再模拟插入、
+  最后把原值写回去，靠差值推断能装多少。每调一次就是两次 setStackInSlot —— GT 的
+  NotifiableItemStackHandler 会因此发变更通知、触发机器更新。板条箱 576 格批量跑一遍
+  就是上千次无谓的写入通知。无参版本直接返回 getSlotLimit(index)，是纯读取。
+  （原版 moveItemStackTo 用的也是无参版本。）
+  另外合并进已有堆时显式 set 写回，不对 getItem() 的返回值原地 grow —— 后者要求
+  getStackInSlot 返回容器内部同一个实例，GT 的 handler 未必如此，返回副本时物品会凭空消失。
+- 实现要点五：目标侧槽位预先按「属于哪一侧」分组，避免每个源格都做一次全量扫描。
+- 实现要点六：BY_TYPE 的「样板物品」必须 copy。遍历时第一个源格往往就是鼠标下那一格，
+  它会被搬空；一旦容器的 setStackInSlot 是「就地改这个 ItemStack」而不是「替换引用」，
+  样板就跟着被清空，后面所有同类物品都匹配不上 —— 表现成只搬了第一格。
+- 说明：LDLib 与 GTOCore 一样是可选依赖，全部走反射访问（LDLib 是模组类，
+  类名/成员名在生产环境不重映射，所以按字面名字反射是稳定的）。
+  没装 LDLib 时板条箱那块整体关闭，模组其余部分照常加载。
+
+1.0.1 - 2026-09-17
+------------------
+- 修复（关键）：shift + 右键用旅行手杖向下穿墙时每次都会掉 1 点血。根因不是摔落伤害
+  （GTO 自己写了 fallDistance = 0），而是原版窒息 minecraft:in_wall：GTO 的
+  teleportPosition 在射线命中点距眼睛 < 3 格时会走 BlockGetter.traverseBlocks 重新找落点，
+  回调优先取「射线所在格的下面那一格」；向下穿过 1 格厚地板时，遍历到的第一格就是那块地板，
+  它的下面已经是空气，于是落点被定成地板正下方那一格 —— 玩家脚落在空腔顶部、
+  头和眼睛留在地板方块里。最后那道 isTeleportPositionClear 拦不住，因为它算的是落点自己
+  的碰撞高度，落点是空气时 height = 0 <= 0.2 直接早退，头顶那块地板根本没被检查。
+- 修复：新增落点安全判定与就近修正。落点装不下玩家时，先在同柱上下搜索、再在水平邻域搜索，
+  找到最近的合法点；救不了就取消本次传送。核心不变量是「落点本身合法就一个字节都不改」，
+  所以穿墙、旅行锚、电梯、落半空、落水里等一切正常场景的行为与不打模组时完全一致。
+- 修复：竖直候选顺序按 |dy| 递增、同 |dy| 时先下后上。最常见的失败形态是「脚落在空腔顶部、
+  头嵌进上方天花板」，向下挪 1 格才是玩家真正想要的结果（继续穿到楼下），
+  向上挪 2 格等于把这次瞬移悄悄撤回。这样「1 格空腔」会取消传送（那里本来就装不下人），
+  「2 格以上空腔」会正常落到楼下地板上。
+- 说明：判定用完整碰撞箱（0.6 × 1.8）而不是原版 isInWall() 的眼睛小盒。因为
+  Player.tick() 里 super.tick()（内部 LivingEntity.baseTick 会调 isInWall 扣血）在前、
+  updatePlayerPose() 在后，落地那一 tick 的姿态还是落地前站在地板上的那个，
+  眼睛正好卡进上方地板 —— 只按「当前姿态眼睛不卡住」判定会把这个 bug 放过去。
+- 说明：「放宽到游泳姿态」加了「落点确实在水里」的前置条件。玩家 Pose.SWIMMING 的碰撞箱
+  是 0.6 × 0.6，而 bug 场景里那个空气格只有 1 格高，0.6 高的游泳箱同样装得下，
+  无条件放宽会让待修的落点被判成合法、修复直接失效。
+- 新增：兜底层。LivingHurtEvent 上抑制「刚被本模组处理过一次非法落点的传送」后 20 tick 内、
+  且玩家确实还嵌在方块里时的 in_wall 伤害。刻意不无条件取消 in_wall（那是原版正常的
+  「被活塞挤进墙里」反馈），位置修正才是根本解法。
+- 新增：可选的 Mixin 增强层（TravelHandlerMixin）。直接修正 TravelHandler.teleportPosition
+  的返回值，让客户端粒子预览与真实落点一致，并让取消传送时不再白吃 5 tick 冷却和 128 EU。
+  用 targets 字符串指定目标、方法体不调用任何原版成员，所以既不需要 GTOCore 编译期依赖，
+  也不需要 Mixin 注解处理器和 refmap；mixin 配置写成 required=false + defaultRequire=0，
+  将来 GTOCore 改签名时只会记日志、不会崩游戏。
+- 新增：调试命令 /travelfix probe（打印原始落点 / 是否合法 / 会被修正到哪，不实际传送）
+  与 /travelfix config（打印生效配置和反射读到的 GTOConfig.travelConfig.blinkRange）。
+- 说明：GTOCore 全程走反射 + 字符串 id 比对，没有编译期依赖；没装 GTOCore 时模组正常加载
+  但不产生任何影响。mods.toml 里把 gtocore 声明为 mandatory=false + ordering=AFTER。
+- 说明：默认只处理「直接 post 基类 EntityTeleportEvent」的传送（GTOCore 的手杖/锚/电梯就是这样）。
+  原版 /tp、末影珍珠、紫颂果、随机传送 post 的是子类，默认不受影响，可用
+  onlyPlainTeleportEvent 配置放开。
+
+复查修正（同为 1.0.1，进游戏验证「不掉血」之后做的）
+----------------------------------------------------
+- 修复（bug）：落点判定误把实体碰撞也算进去了。原来用 level.noCollision(AABB) 单参重载，
+  它转发到 noCollision(null, aabb)，而 CollisionGetter.noCollision 在方块之后紧接着调
+  getEntityCollisions(null, aabb)，谓词是 EntitySelector.CAN_BE_COLLIDED_WITH
+  （= 非旁观 && 自身 canBeCollidedWith() 为真）。Entity#canBeCollidedWith() 默认 false，
+  原版只有 Boat 和 Shulker 覆写成 true，所以船 / 潜影贝 / 任何改写了这个方法的模组实体
+  压在落点上时，物理上完全合法的落点会被判非法 —— 落点被挪走甚至传送被取消。
+  （顺带纠正：单参重载在 entity == null 时反而是跳过世界边界检查的；
+  双参重载 noCollision(entity, aabb) 的谓词是 NO_SPECTATORS.and(entity::canCollideWith)，
+  对船/潜影贝同样会命中。所以「旁边站只牛会误判」这个说法不成立 —— 牛不会被判进来。
+  设计大纲第 3 节那条实现注意说反了，已按字节码改正。）
+  改为 level.getBlockCollisions(entity, box) 只查方块，与 Entity#teleportTo 的语义一致。
+- 修复（bug）：raycastFallback 少守了 GTO 自己的 distManhattan(target) < 2 规则
+  （TravelHandler:198）。后果是四面封闭的空腔里回退落点会算成「你脚下那块地板的顶面」，
+  也就是你自己的位置 → 变成原地传送一次：照扣 128 EU 和 5 tick 冷却、照播传送音效，
+  人只是被吸到方块中心。
+- 修复（bug）：rescue 会把「玩家自己正站着的那个方块」当成修正结果（同一个症状）。
+  现在候选点加两条硬约束：不许是玩家自己所在的那个方块（判到方块级 —— 不能放宽成
+  「相邻方块」，因为旅行锚的落点本来就是 anchorY+2 而玩家站在 anchorY+1，
+  放宽会把锚传送整个废掉）；不许落在「目标相对于玩家脚底那一侧」之外
+  （向下瞬移却把人抬到脚底之上、或原地平移一格，同样是把这次瞬移撤回去）。
+  两条合起来：救不了就老老实实取消，不会再出现「原地传送」或「反向弹一下」。
+- 简化：删掉 GtoCompat 里的死代码 TRAVEL_STAFF_PATH 常量和 isPresent() 方法；
+  SafeLanding.isTeleportPositionClear 从 public 降为 private（只被 raycastFallback 用）；
+  把 search 里重复的「同柱 + 上下偏移」逻辑抽成 tryColumn。
+- 说明：性能。fits 只在落点非法时才会被大量调用（最坏 25 列 × 7 个候选 ≈ 175 次），
+  每次都是区块缓存的 getBlockState，正常路径上只跑一次 fits 就 return。
+  反射读 blinkRange 只在「救不了」和调试命令里发生，且刻意不缓存（GTOConfig 可以在游戏内重载）。
+  TeleportGuard 的 onLivingHurt 把「是不是 in_wall」这个廉价判定放在查 map 之前。
+  结论：没有可感知的额外开销。

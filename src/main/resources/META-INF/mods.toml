@@ -1,0 +1,53 @@
+modLoader="javafml"
+loaderVersion="${loader_version_range}"
+license="${mod_license}"
+
+[[mods]]
+modId="${mod_id}"
+version="${mod_version}"
+displayName="${mod_name}"
+authors="${mod_authors}"
+description='''${mod_description}'''
+
+# gtocore 是可选依赖：模组本身用反射 + 字符串 id 比对识别旅行手杖/旅行锚，
+# 没装 GTOCore 时不会报错，只是传送落点修正整套逻辑都不会触发。
+# ordering="AFTER" 是为了让 Mixin 能落在 GTOCore 的类之后加载。
+[[dependencies.${mod_id}]]
+modId="gtocore"
+mandatory=false
+versionRange="[0,)"
+ordering="AFTER"
+side="BOTH"
+
+# ldlib（LowDragLib）同样是可选依赖：GT / GTO 的机器界面（含板条箱）走它的 ModularUI，
+# 板条箱快捷键那块要用反射访问它。没装 LDLib 时那块功能整体关闭，模组其余部分照常工作。
+[[dependencies.${mod_id}]]
+modId="ldlib"
+mandatory=false
+versionRange="[0,)"
+ordering="AFTER"
+side="BOTH"
+
+# functionalstorage 同样是可选依赖：一格/两格/四格抽屉的「一次填满背包」要用反射
+# 访问它的 Drawer#getHit 才能知道玩家点的是哪一格。
+# 没装时那块功能整体关闭，模组其余部分照常工作。
+[[dependencies.${mod_id}]]
+modId="functionalstorage"
+mandatory=false
+versionRange="[0,)"
+ordering="AFTER"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="forge"
+mandatory=true
+versionRange="${forge_version_range}"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.${mod_id}]]
+modId="minecraft"
+mandatory=true
+versionRange="${minecraft_version_range}"
+ordering="NONE"
+side="BOTH"

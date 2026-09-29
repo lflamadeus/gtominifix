@@ -1,0 +1,39 @@
+# eclipse
+bin
+*.launch
+.settings
+.metadata
+.classpath
+.project
+
+# idea
+out
+*.ipr
+*.iws
+*.iml
+.idea
+
+# gradle
+build
+.gradle
+
+# other
+eclipse
+run
+
+# Files from Forge MDK
+forge*changelog.txt
+
+# 构建 / 测试日志（本地产物，不入库）
+buildlog.txt
+serverlog.txt
+*.log
+
+# 工具与 AI 的临时工作目录
+temp/
+.workbuddy/
+.workbuddy-ai/
+.codemoss/
+
+# Forge 数据生成输出
+src/generated/

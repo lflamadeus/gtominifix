@@ -1,0 +1,10 @@
+项目作者：LAI
+
+特别感谢：
+- Minecraft Forge：提供模组加载器与开发工具链，本模组的挂载点 EntityTeleportEvent 也是 Forge 提供的。
+- GTOCore（GTOdyssey）：本模组修复的是它的旅行手杖落点问题。所有关于落点算法、
+  旅行锚/电梯入口、配置项的结论都来自 GTOCore 源码（com.gtocore.eio_travel.logic.TravelHandler）。
+  模组本身不包含也不修改 GTOCore 的任何代码，全部交互走反射 + 字符串 id 比对。
+- castcrafter/travel_anchors：GTOCore 的旅行传送逻辑源自该项目，
+  本模组复刻的 isTeleportPositionClear 也间接来自它。
+- Mixin（SpongePowered）：方案 B 用的字节码注入框架，由 Forge 运行时提供。
