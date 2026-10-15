@@ -6,11 +6,12 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.config.ModConfigEvent;
 
 /**
- * 模组配置，按功能分成三组：{@code teleport}（旅行手杖落点）、{@code crate}（板条箱快捷键）、
- * {@code drawer}（Functional Storage 抽屉的「一次填满背包」）。
+ * 模组配置，按功能分成五组：{@code teleport}（旅行手杖落点）、{@code crate}（板条箱快捷键）、
+ * {@code drawer}（Functional Storage 抽屉的「一次填满背包」）、
+ * {@code ae2}（AE2 终端上倒空背包里的流体容器）、
+ * {@code pipe}（GTO 流体管道：路由游标修复 + 邻居缓存自愈）。
  *
- * <p>用 COMMON 类型：客户端也要读这些值（板条箱快捷键在客户端判定按键、
- * 传送落点的 Mixin 在客户端也会跑），所以不能放 SERVER。
+ * <p>用 COMMON 类型：客户端也要读这些值（板条箱快捷键在客户端判定按键），所以不能放 SERVER。
  *
  * <p>取值统一走下面的静态缓存字段，由 {@link ModConfigEvent}（Loading / Reloading 都算）
  * 刷新。缓存字段的初始值与 SPEC 里的默认值一一对应，配置还没加载完时用默认值兜底。
@@ -40,6 +41,15 @@ public final class GtoMiniFixConfig {
     // ---- drawer：Functional Storage 抽屉上的「一次填满背包」 ----
 
     private static final ForgeConfigSpec.BooleanValue DRAWER_FILL_ENABLED;
+
+    // ---- ae2：AE2 终端上「倒空背包里的流体容器」的快捷键 ----
+
+    private static final ForgeConfigSpec.BooleanValue AE2_EMPTYING_ENABLED;
+    private static final ForgeConfigSpec.ConfigValue<String> AE2_EMPTYING_KEY;
+
+    // ---- pipe：GTO 流体管道（源头 CoreMod 补丁：不缓存否定结果 + 网络变动通知）----
+
+    private static final ForgeConfigSpec.BooleanValue PIPE_DEBUG_FILE;
 
     private static final ForgeConfigSpec.BooleanValue DEBUG_LOG;
 
@@ -125,6 +135,38 @@ public final class GtoMiniFixConfig {
 
         BUILDER.pop();
 
+        BUILDER.push("ae2");
+
+        AE2_EMPTYING_ENABLED = BUILDER
+                .comment("AE2 终端界面（ME 终端 / 合成终端 / 无线终端……）上的「倒空流体容器」快捷键。",
+                        "按住下面配置的按键 + 右键背包里的流体容器，就等价于：",
+                        "用鼠标拿起那个容器，再对着终端界面右键 —— 容器里的流体全量灌进 ME 网络。",
+                        "按住不放拖过一排容器时，每个新碰到的容器各做一次。",
+                        "流体能不能收、收多少，全部由 AE2 自己算（本模组只是把那次右键模拟出来）。",
+                        "没装 AE2（在本整合包里它是 GTOCore 的 jar-in-jar）时该项无效果。")
+                .define("emptyingEnabled", true);
+
+        AE2_EMPTYING_KEY = BUILDER
+                .comment("上面那个快捷键要按住的键。",
+                        "可以直接写 ctrl / shift / alt（左右两侧都算），",
+                        "也可以写 InputConstants 的键名（如 key.keyboard.v）。",
+                        "用英文逗号分隔可以配多个键，任意一个按住都生效。")
+                .define("emptyingKey", "ctrl");
+
+        BUILDER.pop();
+
+        BUILDER.push("pipe");
+
+        PIPE_DEBUG_FILE = BUILDER
+                .comment("把管道排查信息写进 logs/gtominifix-debug.log（本模组自己写文件，不走 log4j）。",
+                        "本模组的 SLF4J 输出在部分实例里一个字都落不了盘，所以排查只能靠自己写文件：",
+                        "启动信息、/gtominifix pipeprobe 的探针结果、/gtominifix pipewatch 的逐秒时间线，",
+                        "都追加到这个文件里（超过 4 MB 时轮转成 gtominifix-debug.log.1）。",
+                        "关掉后探针/观察只往聊天栏输出，不落盘。")
+                .define("debugFile", true);
+
+        BUILDER.pop();
+
         DEBUG_LOG = BUILDER
                 .comment("打印落点修正 / 批量转移 / 抽屉填包相关日志。")
                 .define("debugLog", false);
@@ -147,6 +189,11 @@ public final class GtoMiniFixConfig {
 
     public static boolean drawerFillEnabled = true;
 
+    public static boolean ae2EmptyingEnabled = true;
+    public static String ae2EmptyingKey = "ctrl";
+
+    public static boolean pipeDebugFile = true;
+
     public static boolean debugLog = false;
 
     private GtoMiniFixConfig() {}
@@ -165,6 +212,9 @@ public final class GtoMiniFixConfig {
         crateShortcutsEnabled = CRATE_SHORTCUTS_ENABLED.get();
         crateTakeOverBulkAll = CRATE_TAKE_OVER_BULK_ALL.get();
         drawerFillEnabled = DRAWER_FILL_ENABLED.get();
+        ae2EmptyingEnabled = AE2_EMPTYING_ENABLED.get();
+        ae2EmptyingKey = AE2_EMPTYING_KEY.get();
+        pipeDebugFile = PIPE_DEBUG_FILE.get();
         debugLog = DEBUG_LOG.get();
     }
 }

@@ -24,12 +24,10 @@ import org.slf4j.Logger;
  *       → {@code blockTeleportTo} → 同一个 {@code teleportEvent}（TravelHandler.java:111）</li>
  * </ul>
  * 而 {@code EntityTeleportEvent} 是 Forge 自己的类，所以这条路线
- * <b>零 Mixin、零 GTOCore 编译期依赖</b>，还顺带覆盖了旅行锚。
+ * <b>零字节码注入、零 GTOCore 编译期依赖</b>，还顺带覆盖了旅行锚。
  *
  * <p>代价：{@code EntityTeleportEvent} 只在服务端触发，所以客户端粒子预览
  * （{@code TravelParticleHandler} 直接调 {@code teleportPosition}）看到的还是原始落点。
- * 想让预览一致就靠 {@code TravelHandlerMixin}，两者叠加是幂等的：
- * 第二遍跑的时候落点已经合法，第一道判断直接放行。
  */
 public final class TeleportFix {
 

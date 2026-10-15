@@ -7,4 +7,3 @@
   模组本身不包含也不修改 GTOCore 的任何代码，全部交互走反射 + 字符串 id 比对。
 - castcrafter/travel_anchors：GTOCore 的旅行传送逻辑源自该项目，
   本模组复刻的 isTeleportPositionClear 也间接来自它。
-- Mixin（SpongePowered）：方案 B 用的字节码注入框架，由 Forge 运行时提供。

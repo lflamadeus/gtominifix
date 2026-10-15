@@ -1,6 +1,74 @@
 更新日志
 ========
 
+1.0.5 - 2026-10-14
+------------------
+- 修复（源头 CoreMod 补丁，替换掉 1.0.5 开发期间的两版临时方案）：机器「有货、下游有空位，
+  却不再往外推」的卡死。实例里实测抓到过 5 台同时处于这个状态（全是输出仓 / 高压釜），
+  现场日志显示管道层是干净的（六面各自重新寻路 24~25 条、目标收 1000 mB 的模拟与实际余量一致），
+  问题在机器侧。两个源头缺陷叠加：
+  * A：BlockEntityDirectionCache#getAdjacentBlockEntity 把「这个方向没有邻居」用哨兵
+    DirectionCache.NULL 永久缓存，之后再也不查世界 —— 机器只要在邻接管道区块还没加载时
+    看过一眼，那一面就整局都瞎；而机器判断「能不能往外推」正好读这个缓存。
+  * B：机器的自动输出是订阅制，退订判据里有一项是「正面邻居此刻能不能收」
+    （FluidHatchPartMachine#updateTankSubscription → hasAdjacentTarget，只看能力、不看容量）。
+    某一刻它为 false（管道 BE 还没就绪、网是空的、方向缓存里是哨兵）时机器就 unsubscribe()
+    并把订阅字段置空，而唯一会周期性重查的 autoIO() 正是被退订掉的那个；订阅只在「机器自己
+    身边有方块变化」时重建，管网增删 / 拆分合并 / 区块加载都不会碰机器 → 掉了就永远不回来。
+    只有重启 / 拆放管道 / 旋转机器（都会触发事件）才恢复。
+  修法（两个 CoreMod 转换器，直接改 GTO 自己的类，不依赖 Mixin）：
+  * A：把 getAdjacentBlockEntity 里每一处 DirectionCache.NULL 的使用换成 aconst_null
+    （栈不变，无需手算帧）。DirectionCache#setCache 原样存值，于是「这个方向没邻居」就等价于
+    「没缓存」，下一次查询自然重新看世界。
+  * B：在 FluidPipeNet#onPipeConnectionsUpdate 头部插入 PipeNetNotify.onNetworkChanged(this)，
+    它把该网的节点位置排队，在下一个服务端 tick 里对每个位置发一次 level.blockUpdated(...)，
+    让旁边的机器走自己的 onNeighborChanged → updateTankSubscription() 重新评估订阅。
+    排队到下一 tick 是有意的：该方法会在管网正被遍历 / 重建时被调用，就地发方块更新可能重入。
+  文件：META-INF/coremods.json + coremods/gtominifix_fluidpipe.js；两个转换器各自包在
+  try/catch 里，出错就原样返回不转换。已离线用 Nashorn+ASM 跑通并用 ASM BasicVerifier
+  逐方法校验（16 个方法 0 失败，确认 3 处哨兵都换成了 aconst_null）。为什么不用 Mixin：
+  本实例的 Mixin 配置从未被 select（日志里 Selecting config 只覆盖注册行号 ≤L2551 的 120 个配置，
+  gtominifix.mixins.json 注册在 L2956），Mixin 形式的注入一次都没生效过；CoreMod 走 ModLauncher
+  的 coremod 链，与 Mixin 的选择机制无关（实例里 gtocore、Apotheosis、LibX、Redirector 都在用）。
+  默认开启；排查时可在实例 config/ 放一个空的 gtominifix-pipe-patch.off 文件，或加 JVM 参数
+  -Dgtominifix.pipePatch=off，把两个补丁一起关掉。/gtominifix config 的 pipe: 行会打印两个补丁
+  各自的存活计数（CoreMod 里写不了文件，不能靠它的日志判断）。
+- 新增：管道现场排查工具（本模组的 SLF4J 在部分实例里落不了盘，所以自己写文件）：
+  /gtominifix pipetrace 对着机器 / 管道（10 格内）执行，打印真实逻辑状态 —— 机器订阅字段、
+  自动 IO 监视器、储罐每槽、正面；六向邻居缓存的原始槽值 vs 世界真值；handler 身份与其 net；
+  逐面重新寻路列出的每条路由，以及「目标能不能收 1000 mB」（走 AE2 键层，与
+  FluidNetHandler.fill 同一条调用）。/gtominifix pipeprobe 打 Forge 能力层的概览。
+  /gtominifix pipewatch <秒> 逐秒记录摘要、每 5 秒一份完整探针、每 5 秒一次
+  「有货+能出+未订阅」巡视，抓「跑一段时间才坏」的那一刻。结果追加到
+  logs/gtominifix-debug.log（超 4 MB 轮转 .1）；探针的「-- 本模组 --」行与 /gtominifix config
+  的 pipe: 行会报告两个 CoreMod 补丁各自的存活计数。配置项 pipe.debugFile（默认开）。
+- 新增：AE2 终端界面上「把背包里流体容器中的流体倒进 ME 网络」的快捷键。
+  按住 Ctrl + 右键背包里的流体容器 = 把该容器整罐倒进网络，等效于
+  「用鼠标拿起容器、对着终端界面右键」；按住不放拖过一排容器时，每个新碰到的容器各做一次。
+  只认玩家背包里的容器，界面上的容器不接管。
+  配置项 ae2.emptyingEnabled（默认开）、ae2.emptyingKey（默认 ctrl）。
+- 移除：1.0.5 开发期间试过、最终没有留下的路径（已全部删除）：
+  * FluidPipeNetMixin / BlockEntityDirectionCacheMixin 两个 Mixin 补丁（本实例从未被
+    select，一次都没跑过）；
+  * TravelHandlerMixin（2026-10-15 删除）—— 传送落点修正的「可选增强层」，同样因为本实例的
+    mixin 配置从未被 select 而一次都没生效过；连带 gtominifix.mixins.json、jar manifest 里的
+    MixinConfigs 属性、以及文档里那套「怎么用 Mixin 打 GTO 的类」的规范一起删除。
+    至此本模组不再包含任何 Mixin：要改 GTO 的类一律用 CoreMod，或者不碰字节码。
+  * PipeIoHook（反射替换机器自动输出的 Runnable、输出前清相邻管道的路由表）—— 能用，
+    但每次自动输出都要重新寻路，且需要区块登记 / 补登记机制，属于绕法而非修法；
+  * AutoOutputReArm（条件式重订阅巡检）与它的三个配置项 pipe.reArm / pipe.reArmTicks /
+    pipe.reArmRescanTicks —— 能缓解症状，但需要常驻登记 + 每 30 秒补扫；A+B 从源头修掉后
+    不再需要，连带区块登记表、巡视与反射重订阅代码一起删除；
+  * 旧的 CoreMod 补丁（重写 FluidPipeNet.getNetData、把路由表按 (管道坐标, 入流面) 缓存）——
+    那个缺陷（netData 只用 pipePos 做键）是真的，但实测证明它不是本次卡住的原因
+    （输出仓不允许输入，流体灌不回去），已随本次重写删除；
+  * PipeTrace + CoreMod 的第二个转换器（在 FluidNetHandler 每个 return 处打点）—— 用来回答
+    「是哪条守卫拒绝的」，事后证明卡点根本不在管道层，一次都没打印出来；而且 CoreMod 里既写
+    不了文件（java.io 被 coremod 类过滤器挡住），print() 也进不了日志文件。
+    教训：不要靠 CoreMod 里的日志验证补丁，从模组侧读目标类的字段 / 方法来判断。
+  对应配置项 pipe.freshLoopCursor / pipe.selfHealCache / pipe.ioHook /
+  pipe.ioHookClearTicks 已删除（旧 toml 里残留的键会被 Forge 忽略并清理）。
+
 1.0.4 - 2026-09-29
 ------------------
 - 授权改为 MIT：仓库根目录的 LICENSE（MIT, Copyright (c) 2026 lflamadeus）是唯一的
