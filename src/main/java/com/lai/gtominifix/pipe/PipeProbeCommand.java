@@ -33,13 +33,13 @@ import java.util.List;
  *
  * <p>三个命令都只读状态，不会去填 / 抽任何流体 —— 唯一带副作用的是探针里对邻居做的
  * {@code fill(SIMULATE)} 与 {@code insert(SIMULATE)}，那是模拟，不改世界。
+ *
+ * <p>聊天栏只显示「缓存表游标停在哪 + 现在满不满足自吃复现条件」这几行；
+ * 完整快照一律写进本模组日志（{@link PipeDebugLog}），免得刷屏。
  */
 public final class PipeProbeCommand {
 
     private static final String PREFIX = "[gtominifix] ";
-
-    /** 聊天栏里最多显示这么多行，其余只落盘（避免刷屏）。 */
-    private static final int CHAT_LIMIT = 60;
 
     private PipeProbeCommand() {}
 
@@ -71,17 +71,7 @@ public final class PipeProbeCommand {
         }
         List<String> lines = PipeProbe.probe(level, pos);
         PipeDebugLog.logLines(lines);
-        int shown = Math.min(lines.size(), CHAT_LIMIT);
-        for (int i = 0; i < shown; i++) {
-            final String line = lines.get(i);
-            source.sendSuccess(() -> Component.literal(PREFIX + line), false);
-        }
-        if (lines.size() > shown) {
-            source.sendSuccess(() -> Component.literal(PREFIX + "…… 还有 " + (lines.size() - shown)
-                    + " 行，完整内容在 " + PipeDebugLog.pathText()), false);
-        } else {
-            source.sendSuccess(() -> Component.literal(PREFIX + "完整内容已追加到 " + PipeDebugLog.pathText()), false);
-        }
+        sendVerdict(source, level, pos, lines.size());
         return 1;
     }
 
@@ -96,14 +86,19 @@ public final class PipeProbeCommand {
         }
         List<String> lines = PipeLogicProbe.probe(level, pos);
         PipeDebugLog.logLines(lines);
-        int shown = Math.min(lines.size(), CHAT_LIMIT);
-        for (int i = 0; i < shown; i++) {
-            final String line = lines.get(i);
+        sendVerdict(source, level, pos, lines.size());
+        return 1;
+    }
+
+    /**
+     * 聊天栏只发「游标停在哪 + 满不满足复现条件」这几行，其余全部落盘到本模组日志。
+     */
+    private static void sendVerdict(CommandSourceStack source, Level level, BlockPos pos, int fullLines) {
+        for (String line : PipeLogicProbe.cursorVerdict(level, pos)) {
             source.sendSuccess(() -> Component.literal(PREFIX + line), false);
         }
-        source.sendSuccess(() -> Component.literal(PREFIX + "（" + lines.size() + " 行，完整内容在 "
+        source.sendSuccess(() -> Component.literal(PREFIX + "（完整 " + fullLines + " 行已写入 "
                 + PipeDebugLog.pathText() + "）"), false);
-        return 1;
     }
 
     private static int watch(CommandContext<CommandSourceStack> context, int seconds) throws CommandSyntaxException {

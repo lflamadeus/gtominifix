@@ -1,176 +1,137 @@
 package com.lai.gtominifix.pipe;
 
-import com.lai.gtominifix.GtoMiniFixConfig;
-import net.minecraft.core.BlockPos;
-import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.state.BlockState;
-import net.minecraftforge.event.TickEvent;
-import net.minecraftforge.eventbus.api.SubscribeEvent;
-
 import java.util.Map;
-import java.util.Queue;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.Level;
 
 /**
- * 配套 CoreMod 的两个补丁（见 {@code src/main/resources/coremods/gtominifix_fluidpipe.js}）。
+ * 流体管道的两个**只观察**注入落点（CoreMod 只负责插调用，判定与行为都在这里，出错时永久关闭自己）。
  *
- * <p>缺陷 A：{@code BlockEntityDirectionCache#getAdjacentBlockEntity} 把「这个方向没有邻居」以
- * {@code DirectionCache.NULL} 哨兵永久缓存，之后再也不查世界 —— 机器只要在邻接管道区块还没加载时
- * 看过一眼，那一面就整局都瞎。补丁把「存哨兵」改成 {@code remove(方向)}（存真正的 null = 没缓存），
- * 下一次查询自然会重新看世界。{@link #markCacheCheck()} 就是那次查询的计数点（只加一个 long）。
+ * <p>监听默认关闭：{@code /gtominifix pipewatch <秒>} 开始时打开、结束时关掉。没开监听时这两个方法
+ * 第一行就返回 —— 只剩一次静态调用 + 一个布尔读，不做任何别的事（无反射、无分配、无磁盘）。
  *
- * <p>缺陷 B：管网结构变化（放/拆管道、网络拆分合并、区块加载卸载）不会通知旁边的机器，而机器一旦
- * 因为「邻居此刻收不下」退掉自动输出订阅（{@code FluidHatchPartMachine#updateTankSubscription}），
- * 就只剩「自己身边方块变化」能把它叫回来。补丁在 {@code FluidPipeNet#onPipeConnectionsUpdate}
- * 开头调用 {@link #onNetworkChanged(Object)}：把这张网的节点位置排队，在下一个服务端 tick 里对每个
- * 位置发一次邻居更新（{@code level.blockUpdated}），于是旁边的机器会重新评估订阅。
- *
- * <p>排队到下一 tick 执行是有意的：{@code onPipeConnectionsUpdate} 会在管网正在被遍历/重建时被调用，
- * 就地发方块更新可能重入管网代码。全部反射 + 只读字段，任何异常都只记一次并永久关闭自己。
+ * <p>本模组**不再对流体管道打任何修复补丁**：GTO 26.10.53 起上游已按本模组提交的建议修掉了那个缺陷
+ * （路由表与调用者无关 + 消费侧剔除指回调用者自己的那条路由），这里只留排查用的观察点。
  */
 public final class PipeNetNotify {
 
-    /** 每 tick 最多处理多少个节点，防止一次网络重组把 tick 拖长。 */
-    private static final int MAX_PER_TICK = 4096;
-
-    private static final Queue<Entry> QUEUE = new ConcurrentLinkedQueue<>();
-    private static final Set<Long> SEEN = ConcurrentHashMap.newKeySet();
+    private PipeNetNotify() {}
 
     private static volatile boolean broken;
     private static volatile String lastError = "";
-    private static volatile long cacheChecks;
-    private static volatile long notifyCalls;
-    private static volatile long queued;
-    private static volatile long notified;
-    private static volatile long notifyTicks;
+    /** 观察是否打开：只由 /gtominifix pipewatch 的开关控制。 */
+    private static volatile boolean tracing;
 
-    private PipeNetNotify() {
+    private static final Map<Long, Boolean> LAST_SUB = new ConcurrentHashMap<>();
+    private static final Map<Long, String> LAST_XFER = new ConcurrentHashMap<>();
+
+    public static void setTracing(boolean on) {
+        tracing = on;
+        if (!on) {
+            LAST_SUB.clear();
+            LAST_XFER.clear();
+        }
     }
 
-    private record Entry(Level level, BlockPos pos, long key) {
+    public static boolean isTracing() {
+        return tracing;
     }
 
     /**
-     * 由 CoreMod 注入到 {@code BlockEntityDirectionCache#getAdjacentBlockEntity} 头部。
-     * 这是热路径：只做一次 long 自增，绝不做别的事。
+     * 由 CoreMod 注入到 {@code FluidHatchPartMachine#updateTankSubscription(Direction)} 头部。
+     * 机器判据 = 工作启用 && 有货 && 正面邻居此刻能收，任一为假就退订，而退订后只有身边方块变化
+     * 才能把它叫回来。只在「应订阅」状态翻转时记一行。
      */
-    public static void markCacheCheck() {
-        cacheChecks++;
-    }
-
-    /**
-     * 由 CoreMod 注入到 {@code FluidPipeNet#onPipeConnectionsUpdate} 头部。
-     *
-     * @param net 那根管道所属的 {@code FluidPipeNet}（调用方传 this）
-     */
-    public static void onNetworkChanged(Object net) {
-        notifyCalls++;
-        if (broken || net == null) {
+    public static void onSubscriptionCheck(Object machine, Object facing) {
+        if (!tracing || broken || machine == null) {
             return;
         }
         try {
-            enqueue(net);
+            BlockPos pos = asPos(PipeProbe.call(machine, "getPos"));
+            if (pos == null) {
+                return;
+            }
+            Object working = PipeProbe.call(machine, "isWorkingEnabled");
+            Object io = PipeProbe.read(machine, "io");
+            Object tank = PipeProbe.tankOf(machine);
+            boolean hasGoods = false;
+            if (tank != null) {
+                Object amount = PipeProbe.call(tank, "amountAt", 0);
+                hasGoods = amount instanceof Number n && n.longValue() > 0L;
+            }
+            Object level = PipeProbe.call(machine, "getLevel");
+            Object holder = PipeProbe.read(machine, "holder");
+            Object cache = holder == null ? null : PipeProbe.read(holder, "blockEntityDirectionCache");
+            Object canAccept = "?";
+            if (cache != null && level instanceof Level lv) {
+                canAccept = PipeProbe.call(cache, "hasAdjacentTarget", lv, pos, facing,
+                        PipeProbe.aeKeyTypeFluids(), PipeProbe.storageAccess("INSERT"));
+            }
+            boolean should = Boolean.TRUE.equals(working) && hasGoods && Boolean.TRUE.equals(canAccept);
+            Boolean last = LAST_SUB.put(pos.asLong(), should);
+            if (last == null || last.booleanValue() != should) {
+                PipeDebugLog.log("[订阅] " + pos.toShortString() + " " + machine.getClass().getSimpleName()
+                        + " 应订阅=" + should
+                        + " 当前订阅=" + (PipeProbe.read(machine, "autoIOSubs") == null ? "off" : "on")
+                        + " 工作=" + working + " io=" + io + " 有货=" + hasGoods
+                        + " 正面=" + facing + " 邻居能收=" + canAccept);
+            }
         } catch (Throwable t) {
             fail(t);
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private static void enqueue(Object net) {
-        Object levelObj = PipeProbe.call(net, "getLevel");
-        if (!(levelObj instanceof Level level)) {
+    /**
+     * 由 CoreMod 注入到 {@code FluidPipeBlockEntity#addTransferredFluids(int)} 头部。
+     * 用来看配额计数器是被单次大额还是高频小额顶满的：每根管道每秒、每种 amount 只记一行。
+     */
+    public static void onTransferredAdded(Object pipe, int amount) {
+        if (!tracing || broken || pipe == null || amount <= 0) {
             return;
         }
-        Object mapObj = PipeProbe.read(net, "nodeByBlockPos");
-        if (!(mapObj instanceof Map<?, ?> nodes)) {
-            return;
-        }
-        int dimension = level.dimension().location().hashCode();
-        int added = 0;
-        for (Object raw : nodes.keySet()) {
-            if (!(raw instanceof Number number)) {
-                continue;
+        try {
+            BlockPos pos = asPos(PipeProbe.call(pipe, "getBlockPos"));
+            if (pos == null) {
+                pos = asPos(PipeProbe.call(pipe, "getPipePos"));
             }
-            long packed = number.longValue();
-            long key = ((long) dimension << 32) ^ packed;
-            if (!SEEN.add(key)) {
-                continue;
+            if (pos == null) {
+                return;
             }
-            QUEUE.add(new Entry(level, BlockPos.of(packed), key));
-            added++;
+            String sig = amount + "@" + (System.currentTimeMillis() / 1000L);
+            if (sig.equals(LAST_XFER.put(pos.asLong(), sig))) {
+                return;
+            }
+            PipeDebugLog.log("[配额] " + pos.toShortString() + " += " + amount
+                    + " → 累计=" + PipeProbe.read(pipe, "transferredFluids")
+                    + " timer=" + PipeProbe.read(pipe, "timer")
+                    + " levelTime=" + PipeProbe.call(pipe, "getLevelTime"));
+        } catch (Throwable t) {
+            fail(t);
         }
-        queued += added;
     }
 
-    /** 把排队的节点位置在下一次服务端 tick 里变成邻居更新。 */
-    @SubscribeEvent
-    public static void onLevelTick(TickEvent.LevelTickEvent event) {
-        if (broken || event.phase != TickEvent.Phase.END || !(event.level instanceof ServerLevel)) {
-            return;
-        }
-        if (QUEUE.isEmpty()) {
-            return;
-        }
-        int budget = MAX_PER_TICK;
-        int done = 0;
-        while (budget-- > 0) {
-            Entry entry = QUEUE.poll();
-            if (entry == null) {
-                break;
-            }
-            SEEN.remove(entry.key());
-            try {
-                BlockState state = entry.level().getBlockState(entry.pos());
-                if (state.isAir()) {
-                    continue;
-                }
-                entry.level().blockUpdated(entry.pos(), state.getBlock());
-                done++;
-            } catch (Throwable t) {
-                fail(t);
-                break;
-            }
-        }
-        if (done > 0) {
-            notified += done;
-            notifyTicks++;
-        }
+    private static BlockPos asPos(Object o) {
+        return o instanceof BlockPos pos ? pos : null;
     }
 
     private static void fail(Throwable t) {
         if (!broken) {
             broken = true;
             lastError = t.getClass().getName() + ": " + t.getMessage();
-            if (GtoMiniFixConfig.pipeDebugFile) {
-                PipeDebugLog.log("PipeNetNotify 出错，已永久关闭自己：" + lastError);
-            }
+            PipeDebugLog.log("PipeNetNotify 出错，已永久关闭自己：" + lastError);
         }
     }
 
-    /** 给 /gtominifix config 与探针用的一行状态。 */
+    // ------------------------------------------------ 状态（只给 /gtominifix config 与探针用）
+
     public static String statusText() {
         StringBuilder sb = new StringBuilder();
-        sb.append("A 缓存补丁=");
-        if (cacheChecks > 0) {
-            sb.append("已生效（").append(cacheChecks).append(" 次邻居查询）");
-        } else {
-            sb.append("尚未被调用（CoreMod 没生效或还没查过邻居）");
-        }
-        sb.append("，B 网络通知=");
-        if (notifyCalls > 0) {
-            sb.append("已生效（收到 ").append(notifyCalls).append(" 次网络变动，唤醒 ")
-                    .append(notified).append(" 个管道位置）");
-        } else {
-            sb.append("尚未被调用（CoreMod 没生效或网络还没变动过）");
-        }
-        if (queued > 0) {
-            sb.append("，待处理=").append(QUEUE.size());
-        }
+        sb.append("监听=").append(tracing ? "开（pipewatch 运行中）" : "关（用 /gtominifix pipewatch 打开）");
+        sb.append("；本模组不对流体管道打修复补丁（GTO 26.10.53 起上游已修）");
         if (broken) {
-            sb.append("（已永久关闭：").append(lastError).append("）");
+            sb.append("；观察已永久关闭：").append(lastError);
         }
         return sb.toString();
     }

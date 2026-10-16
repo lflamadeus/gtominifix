@@ -44,25 +44,11 @@ public final class PipeLogicProbe {
     private static final String HANDLER_MARK = "FluidNetHandler";
     private static final String WALKER = "com.gregtechceu.gtceu.common.pipelike.fluid.FluidNetWalker";
 
-    /** 存在这个文件就表示「CoreMod 源头补丁被关掉」（放在实例的 {@code config/} 下）。 */
-    public static final String FLAG_FILE = "gtominifix-pipe-patch.off";
-
     private PipeLogicProbe() {}
 
-    /** CoreMod 补丁是否生效：直接看两个补丁各自的存活计数（比翻日志可靠，coremod 里写不了文件）。 */
+    /** 本模组管道侧的状态：只剩观察点，监听默认关（{@code /gtominifix pipewatch} 打开）。 */
     public static String coremodStatus() {
         return PipeNetNotify.statusText();
-    }
-
-    /** 开关文件状态（存在 = 补丁被关掉）。 */
-    public static String flagState() {
-        try {
-            java.nio.file.Path flag = net.minecraftforge.fml.loading.FMLPaths.GAMEDIR.get()
-                    .resolve("config").resolve(FLAG_FILE);
-            return java.nio.file.Files.exists(flag) ? "补丁已关闭(" + flag + ")" : "补丁未关闭(无开关文件)";
-        } catch (Throwable t) {
-            return "读不到(" + t.getClass().getSimpleName() + ")";
-        }
     }
 
     /** 完整逻辑探针。 */
@@ -180,8 +166,11 @@ public final class PipeLogicProbe {
                 sb.append(" defaultHandler=").append(identOrNull(PipeProbe.read(be, "defaultHandler")));
                 sb.append(" handlers=").append(sizeOf(PipeProbe.read(be, "handlers")));
                 sb.append(" transferred=").append(PipeProbe.read(be, "transferredFluids"));
+                sb.append(" timer=").append(PipeProbe.read(be, "timer"));
+                sb.append(" levelTime=").append(PipeProbe.call(be, "getLevelTime"));
                 sb.append(" blockedSide=").append(PipeProbe.read(be, "blockedSide"));
             }
+            sb.append(cursorCompact(level, pos));
             return sb.toString();
         } catch (Throwable t) {
             return "compact 出错（已忽略）：" + t;
@@ -309,6 +298,8 @@ public final class PipeLogicProbe {
         Object netData = got == null ? null : PipeProbe.read(got, "netData");
         out.add("    netData(got 的缓存) 条目数=" + sizeOf(netData)
                 + (netData == null ? "" : "  含本管道? " + boolText(PipeProbe.call(netData, "containsKey", longPos))));
+        // 只读地列出缓存里那张表：谁先 insert 谁决定它，也是「自吃」的直接证据
+        dumpCachedTable(got, longPos, level, pos, out);
         // 每个面：连接状态、缓存槽、handler、当场重新寻路
         // 注意：管道自己没储罐，本面邻居又常常是另一根管道/空面 → 按面借键会借不到，
         // 于是先在这根管道的机器邻居里借一个键，本面借不到时用它，免得 insert 模拟全被跳过。
@@ -357,6 +348,196 @@ public final class PipeLogicProbe {
         } catch (Throwable ignored) {
         }
         return null;
+    }
+
+    /**
+     * 只读地列出「缓存里那张路由表」的内容。
+     *
+     * <p>键只有管道坐标 → 六面共用同一张表，谁先 insert 谁决定它的内容。
+     * 这张表里如果出现紧贴本管道的方块（也就是刚往管道里推流体的那台机器），
+     * 那台机器的流体就会被送回自己、把本秒的配额吃满。
+     *
+     * <p><b>绝不调用 {@code getNetData}</b>：那会在 miss 时建表并写缓存，把现场毁掉。
+     */
+    private static void dumpCachedTable(Object net, Object longPos, Level level, BlockPos pos, List<String> out) {
+        try {
+            Object map = net == null ? null : PipeProbe.read(net, "netData");
+            Object table = map == null || longPos == null ? null : PipeProbe.call(map, "get", longPos);
+            if (table == null) {
+                out.add("    缓存表：本管道没有条目（还没人 insert 过，或被清过）→ 下一个 insert 的机器将决定这张表");
+                return;
+            }
+            Object[] routes = PipeProbe.asArray(PipeProbe.read(table, "array"));
+            if (routes == null) {
+                out.add("    缓存表：读不到 array");
+                return;
+            }
+            out.add("    缓存表内容（只读，" + routes.length + " 条；键只有管道坐标 → 六面共用这一张）：");
+            int shown = 0;
+            for (int i = 0; i < routes.length && shown < 10; i++) {
+                Object r = routes[i];
+                if (r == null) {
+                    continue;
+                }
+                Object tp = PipeProbe.call(r, "getTargetPipePos");
+                Object tf = PipeProbe.call(r, "getTargetFacing");
+                if (!(tp instanceof BlockPos tpBp) || !(tf instanceof Direction dir)) {
+                    continue;
+                }
+                BlockPos target = tpBp.relative(dir);
+                BlockEntity tbe = level.getBlockEntity(target);
+                out.add("      [" + i + "] → " + target.toShortString() + " 面=" + name(dir)
+                        + " 类=" + (tbe == null ? "无方块实体" : simple(tbe))
+                        + (target.distManhattan(pos) == 1 ? "  ★紧贴本管道（源机器很可能就是它）" : "")
+                        + " handler=" + identOrNull(PipeProbe.call(r, "getHandler", level)));
+                shown++;
+            }
+            Cursor cur = cursorOf(level, pos);
+            out.add("    游标（index = 下一次 execute 遍历的起点）：index=" + cur.index + "/" + cur.size
+                    + " remaining=" + cur.remaining + " 起点=#" + cur.start
+                    + (cur.target == null ? "（起点路由读不出目标）"
+                    : " → " + cur.target.toShortString() + "（" + (cur.targetBe == null ? "无方块实体" : simple(cur.targetBe)) + "）"
+                    + (cur.adjacent ? "  ★紧贴本管道 → 那台机器一推就自吃（复现条件成立）" : "（非紧贴，不会自吃）")));
+        } catch (Throwable t) {
+            out.add("    缓存表：读取出错（已忽略）：" + t);
+        }
+    }
+
+    /** 缓存表游标的事实（全部只读）。 */
+    private static final class Cursor {
+        BlockPos pipePos;
+        int index = -1;
+        int size;
+        int remaining = -1;
+        int start = -1;
+        BlockPos target;
+        BlockEntity targetBe;
+        boolean adjacent;
+        Object targetKey;
+        String note = "";
+    }
+
+    /**
+     * 读「缓存表游标」：{@code netData} 里存的是一个<b>可变的 {@code LoopIterator}</b>，
+     * 它的 {@code index} 就是下一次 execute 遍历的起点 —— 而 execute 遍历
+     * （{@code FluidNetHandler.fillFirst} 里的 {@code for (inv : data)}）走的正是这个游标；
+     * simulate 分支直接用 {@code data.array}，所以只有 execute 会受它影响。
+     *
+     * <p>若起点那条路由指向<b>紧贴本管道的方块</b>，那台机器下一次推送就从「指向自己」的路由开始，
+     * 流体被推回自己、本秒配额被吃满 —— 这就是卡住的复现条件。
+     *
+     * <p><b>绝不调用 {@code getNetData}</b>（miss 时会建表并写缓存，把现场毁掉），也不改任何字段。
+     */
+    private static Cursor cursorOf(Level level, BlockPos pos) {
+        Cursor c = new Cursor();
+        try {
+            BlockEntity be = level.getBlockEntity(pos);
+            BlockEntity pipe = be != null && isPipe(be) ? be : null;
+            BlockPos pipePos = pos;
+            if (pipe == null) {
+                for (Direction d : Direction.values()) {
+                    BlockEntity n = level.getBlockEntity(pos.relative(d));
+                    if (n != null && isPipe(n)) {
+                        pipe = n;
+                        pipePos = pos.relative(d);
+                        break;
+                    }
+                }
+            }
+            if (pipe == null) {
+                c.note = "这里没有 GTO 流体管道，读不到路由表";
+                return c;
+            }
+            c.pipePos = pipePos;
+            Object net = PipeProbe.call(pipe, "getFluidPipeNet");
+            Object map = net == null ? null : PipeProbe.read(net, "netData");
+            Object longPos = PipeProbe.call(pipe, "getPipeLongPos");
+            Object table = map == null || longPos == null ? null : PipeProbe.call(map, "get", longPos);
+            if (table == null) {
+                c.note = "本管道还没有缓存表（还没人 insert 过，或被清过）";
+                return c;
+            }
+            Object[] routes = PipeProbe.asArray(PipeProbe.read(table, "array"));
+            c.size = routes == null ? 0 : routes.length;
+            c.index = intOf(PipeProbe.read(table, "index"), -1);
+            c.remaining = intOf(PipeProbe.read(table, "remaining"), -1);
+            if (c.size <= 0) {
+                c.note = "缓存表是空的";
+                return c;
+            }
+            c.start = c.index < 0 || c.index >= c.size ? 0 : c.index;
+            Object r = routes[c.start];
+            if (r == null) {
+                c.note = "起点路由是空的";
+                return c;
+            }
+            Object tp = PipeProbe.call(r, "getTargetPipePos");
+            Object tf = PipeProbe.call(r, "getTargetFacing");
+            if (tp instanceof BlockPos b && tf instanceof Direction d) {
+                c.target = b.relative(d);
+                c.targetBe = level.getBlockEntity(c.target);
+                c.adjacent = c.target.distManhattan(pipePos) == 1;
+                Object machine = c.targetBe == null ? null : PipeProbe.machineOf(c.targetBe);
+                c.targetKey = machine == null ? null : tankKey(PipeProbe.tankOf(machine));
+            }
+        } catch (Throwable t) {
+            c.note = "读取出错（已忽略）：" + t;
+        }
+        return c;
+    }
+
+    private static int intOf(Object o, int fallback) {
+        return o instanceof Number n ? n.intValue() : fallback;
+    }
+
+    /**
+     * 聊天栏里唯一要看的几行：游标停在哪 + 现在满不满足复现条件。其余内容一律进日志。
+     */
+    public static List<String> cursorVerdict(Level level, BlockPos pos) {
+        List<String> out = new ArrayList<>();
+        if (level == null || pos == null) {
+            out.add("游标：level/pos 为空");
+            return out;
+        }
+        Cursor c = cursorOf(level, pos);
+        if (!c.note.isEmpty()) {
+            out.add("游标：" + c.note);
+            if (c.pipePos != null) {
+                out.add("  管道 " + c.pipePos.toShortString() + "：现在还不满足复现条件");
+            }
+            return out;
+        }
+        out.add("游标 index=" + c.index + "/" + c.size + " remaining=" + c.remaining
+                + " → 下一次 execute 遍历从 #" + c.start + " 开始");
+        if (c.target == null) {
+            out.add("起点路由 #" + c.start + " 读不出目标 → 不满足");
+            return out;
+        }
+        out.add("起点路由 #" + c.start + " → " + c.target.toShortString()
+                + "（" + (c.targetBe == null ? "无方块实体" : simple(c.targetBe)) + "）"
+                + (c.adjacent ? "  ★紧贴本管道" : ""));
+        if (c.adjacent) {
+            out.add("满足复现条件：打开 " + c.target.toShortString() + " 的自动输出，它下一次推送就从这条路由开始 → 自己推回自己"
+                    + (c.targetKey == null ? "（该机器现在没货，先给它灌一点）" : "（该机器有货：" + c.targetKey + "）"));
+        } else {
+            out.add("不满足：起点不是紧贴本管道的方块，那台机器推的时候撞不到自己");
+        }
+        return out;
+    }
+
+    /** 逐秒观察用的一小段游标摘要（写进日志，不刷聊天栏）。 */
+    private static String cursorCompact(Level level, BlockPos pos) {
+        try {
+            Cursor c = cursorOf(level, pos);
+            if (!c.note.isEmpty()) {
+                return " | 游标=" + c.note;
+            }
+            return " | 游标=" + c.index + "/" + c.size + " 起点=#" + c.start + "→"
+                    + (c.target == null ? "?" : c.target.toShortString())
+                    + (c.adjacent ? " ★紧贴=可复现" : " 非紧贴");
+        } catch (Throwable t) {
+            return " | 游标=读不到";
+        }
     }
 
     /** 某个方块实体（机器）里的流体键，用来在探针里做 insert 模拟。 */

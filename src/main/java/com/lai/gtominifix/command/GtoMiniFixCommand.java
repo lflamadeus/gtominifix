@@ -69,11 +69,9 @@ public final class GtoMiniFixCommand {
                 GtoMiniFixConfig.ae2EmptyingEnabled,
                 GtoMiniFixConfig.ae2EmptyingKey,
                 Ae2Compat.isAvailable() ? "可用" : "不可用（功能关闭）")), false);
-        // 管道那块的修复是两个 CoreMod 补丁，没有配置项；这里报「补丁到底生效没有」。
-        // A = 邻居缓存不再永久缓存「没邻居」；B = 管网变动时通知旁边机器重新评估自动输出订阅。
+        // 管道那块只剩观察点（监听默认关，/gtominifix pipewatch 打开），这里报它现在的状态。
         source.sendSuccess(() -> Component.literal(PREFIX
-                + "pipe: " + PipeNetNotify.statusText()
-                + "，开关=" + PipeLogicProbe.flagState()), false);
+                + "pipe: " + PipeNetNotify.statusText()), false);
         source.sendSuccess(() -> Component.literal(String.format(PREFIX
                         + "debugLog=%s, GTOCore.blinkRange=%d（反射读值）",
                 GtoMiniFixConfig.debugLog,

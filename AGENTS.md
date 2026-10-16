@@ -15,7 +15,7 @@
   | `crate` | 板条箱快捷存取（兼容 Inventory Essentials） | `docs/crate.md` |
   | `drawer` | 抽屉批量填充（Functional Storage） | `docs/drawer.md` |
   | `ae2` | AE2 快速倒空 | `docs/ae2.md` |
-  | `pipe` | GTO 机器「有货却不再往外推」的两处源头修复（CoreMod：邻居缓存不再缓存否定结果 + 管网变动时叫醒相邻机器）+ `pipetrace` / `pipeprobe` / `pipewatch` 排查工具 | `docs/pipe.md` |
+  | `pipe` | GTO 流体管道**只读排查工具**（`pipetrace` / `pipeprobe` / `pipewatch`）——上游 gtceu 26.10.53 已修路由表那个缺陷，本模组不再打补丁 | `docs/pipe.md` |
 
   另有基础设施：`network`（网络消息）、`command`（`/gtominifix` 命令）、`GtoMiniFixConfig`（配置）。
 - **铁律**：对 GTO / AE2 / LDLib / Functional Storage 的依赖一律走**反射**或**CoreMod（JS 字节码）**，
@@ -61,9 +61,10 @@ Copy-Item build\libs\gtominifix-1.0.5.jar $m -Force
 `autoIOSubs` / `getFrontFacing` 都在机器对象上，从 BE 直接读只会得到 null。
 
 日志文件：实例 `logs\gtominifix-debug.log`（超 4 MB 轮转 `.1`，受 `[pipe] debugFile` 控制）。
-`/gtominifix config` 的 `pipe:` 行给出两个 CoreMod 补丁的存活计数（`PipeNetNotify.statusText()`：
-邻居缓存检查次数 / 管网变动通知次数 / 已发方块更新数），探针的 `-- 本模组 --` 行同源。
-计数不涨 = 补丁没进去。细节见 `docs/pipe.md`。
+`/gtominifix config` 的 `pipe:` 行报监听状态（`PipeNetNotify.statusText()`：`监听=开/关；本模组不对流体管道
+打修复补丁…`），探针的 `-- 本模组 --` 行同源。**监听默认关**：只有 `/gtominifix pipewatch` 运行期间那两个
+只观察注入点才写日志，不监听时它们第一行就返回（只剩一次静态调用 + 一个布尔读）。细节与缺陷留档见
+`docs/pipe.md`。
 
 ## 看 GTO / AE2 内部实现
 
@@ -96,15 +97,31 @@ jar-in-jar（脚本会自动抽出来并缓存到 `tools\out\_jars\`）。
 10. 本会话的 shell 是 **Windows PowerShell 5.1**（`pwsh` 不在 PATH）；`.ps1` 必须带 UTF-8 BOM，`.cmd` 必须纯 ASCII。
 11. **不要在 CoreMod 里写日志来验证自己**：JS 里 `print()` 只进启动器控制台、不进日志文件，
     `java.io` 被 coremod 类过滤器挡住（异常还会被自己的 try/catch 吞掉）。验证补丁有没有生效，
-    一律**从模组侧**判断：让补丁在方法头调一次我们自己的计数方法（如
-    `PipeNetNotify.markCacheCheck()`），再读 `/gtominifix config` 的 `pipe:` 行计数涨不涨。
+    一律**从模组侧**判断：让注入的字节码调一次我们自己的方法（当前只剩两个只观察注入点，
+    `/gtominifix config` 的 `pipe:` 行显示监听开没开；早期那套「补丁已生效 / 剔除计数」验证过就删了，
+    为了不监听时零开销）。
     改 JS 之后先跑离线验证器：`java '-Dfile.encoding=UTF-8' -cp <nashorn-core-15.4;asm-9.8;
     asm-tree;asm-analysis;asm-util;asm-commons> org.openjdk.nashorn.tools.Shell temp\coremod_test\driver.js`
-    （读 `tools\out\_jars\gtceu-*.jar` 里的目标类、应用所有转换器、用 ASM `BasicVerifier` 逐方法校验）。
-12. **订阅型机制（GTO 机器自动输出 / 管道自动抽取）退了不会自己回来**：它们的周期性任务正是被
-    退订掉的那个，而订阅只在「机器自己身边有方块变化」时重建。所以修法是补触发链
-    （管网变动 → 给相邻机器发一次方块更新，见 `PipeNetNotify`），再配上「不缓存否定结果」
-    （`BlockEntityDirectionCache` 的 NULL 哨兵）。不要靠定时巡检去重订阅（那是绕法，见 `docs/pipe.md` 历史）。
+    （读 `tools\out\_jars\gtceu-*.jar` 里的目标类、应用所有转换器、用 ASM `BasicVerifier` 逐方法校验，
+    并可用 `javap -c` 确认注入点）；**最后一行必须是「注入调用点异常 0 个」** —— driver 会把注入的调用
+    与 `build\classes\java\main` 下真实的模组 class 逐个比对方法名 + 描述符。`BasicVerifier` 查不出描述符
+    写错：曾把第三个参数写成 `Lnet/minecraft/core/Direction;` 而 Java 侧是 `Ljava/lang/Object;`，
+    离线全绿、进游戏第一次推流体就 `NoSuchMethodError` 崩掉服务端 tick。
+    **注入必须帧中性**（不新增局部变量 / 分支，栈上类型不变），否则 `COMPUTE_FRAMES` 写出会炸
+    （遇到过 `Frame.getConcreteOutputType` 的 `ArrayIndexOutOfBoundsException`）。
+12. **GTO 流体路由表按「管道坐标」缓存、内容却按「入流面」生成** —— **上游 gtceu 26.10.53 已修**
+    （`FluidNetWalker#createNetData` 删掉了 `sourceFacing` 参数、`sourcePipe`/`facingToHandler` 字段整个消失、
+    `checkNeighbour` 里那句排除整段移除；`FluidNetHandler#fillFirst` 两个分支都加了 `!this.isBackToSelf(inv)`；
+    `FluidPipeNet#getNetData(long, BlockPos)` 少了 `Direction`）。本模组对应的 D/E 两个 CoreMod 补丁
+    2026-10-16 已删（新签名匹配不到，只会静默跳过，还会让 `pipe:` 行一直显示「尚未被调用」）。
+    留档是因为同一格管道上「谁先插入谁定表」会产生两种相反的表现：
+    ① 表里**多**了一条指回调用者自己的路由 → 它一推就把流体送回自己、按目标自报的接受量记满该格每秒
+    配额（`FluidPipeBlockEntity.transferredFluids`，上限 = 路由吞吐 × 20）→ 下游收不到，而它自己液位不变。
+    ② 表里**少**了一条 —— 建表者自己那一面的邻居被永久排除，从别的面推的机器永远到不了那个目标
+    （实测：重燃油缸在管道上方、蒸馏室输入在南面，表由南面插入者先建 → 缸怎么推都到不了蒸馏室）。
+    两条必须配套修：只补①补不回缺失的路由，只补②会让自吃回来。
+    另有一条**独立**的真实缺陷：订阅型机制（机器自动输出）退了不会自己回来（周期性任务正是被退订的
+    那个，订阅只在机器身边有方块变化时重建）—— 上游 26.10.53 也没改它，本模组不为它打补丁。
 
 ## 改代码的标准流程
 

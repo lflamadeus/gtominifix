@@ -5,7 +5,6 @@ import com.lai.gtominifix.drawer.DrawerFill;
 import com.lai.gtominifix.drawer.FunctionalStorageCompat;
 import com.lai.gtominifix.network.ModNetwork;
 import com.lai.gtominifix.pipe.PipeDebugLog;
-import com.lai.gtominifix.pipe.PipeNetNotify;
 import com.lai.gtominifix.pipe.PipeWatch;
 import com.lai.gtominifix.teleport.GtoCompat;
 import com.lai.gtominifix.teleport.TeleportFix;
@@ -79,9 +78,6 @@ public final class GtoMiniFix {
         MinecraftForge.EVENT_BUS.register(TeleportGuard.class);
         // pipe 的逐秒观察：/gtominifix pipewatch 用，没开始观察时它的 tick 处理器会立刻返回。
         MinecraftForge.EVENT_BUS.register(PipeWatch.class);
-        // 管网变动通知：CoreMod 在 FluidPipeNet#onPipeConnectionsUpdate 里调 PipeNetNotify，
-        // 它把节点位置排队，在下一 tick 发邻居更新，让旁边的机器重新评估自动输出订阅。
-        MinecraftForge.EVENT_BUS.register(PipeNetNotify.class);
         // 本模组的 SLF4J 在部分实例里落不了盘（连 debug.log 都没有），管道排查改成自己写文件。
         // 这里只定位路径；真正的写入由 /gtominifix pipeprobe 与 pipewatch 触发。
         try {

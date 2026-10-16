@@ -63,13 +63,21 @@
   排查完把调试输出删干净。
 - `debugLog` 只覆盖它自己那几处，别假设全功能都打。
 - 反编译核实：`tools\decompile.cmd <jar> <包或类>`，看描述符加 `-Javap`。细节见 `docs/gto-internals.md`。
-- **订阅型机制退了不会自己回来**：GTO 机器（`FluidHatchPartMachine#updateTankSubscription`）与管道
-  （`FluidPipeBlockEntity#autoTransfer`）的订阅只在事件里重建，而它们的周期性任务正是被退订掉的那个
-  → **从源头补触发链**：管网变动时给相邻机器发一次方块更新（`pipe\PipeNetNotify.java` 的
-  `onNetworkChanged`，由 CoreMod 挂在 `FluidPipeNet#onPipeConnectionsUpdate` 头部），
-  再配上「不缓存否定结果」（`BlockEntityDirectionCache` 的 `NULL` 哨兵）。见 `docs/pipe.md`。
-  ⚠️ **别用「条件式重新订阅」巡检**（`AutoOutputReArm`，已删除）：能缓解症状，但要常驻登记 +
-  每 30 秒补扫，是绕法不是修法；同理别做定时无脑重订阅。
+- **流体路由表：缓存的是「拓扑」，判据却带「入流面」**（GTO 的坑，本项目踩最久的一个）：
+  `FluidPipeNet#getNetData(long pipePos, BlockPos pos, Direction facing)` 的表只按 `pipePos` 缓存，
+  内容却按 `facing` 生成（`FluidNetWalker.checkNeighbour` 排除本次寻路的源面）→ 同一格管道上
+  「谁先插入谁定表」，后来的机器复用别人的表就会把流体推回自己（或反过来：表里少了建表者那一面的
+  目标），并按目标自报的接受量记满该格每秒配额（`FluidPipeBlockEntity.transferredFluids`）→ 下游收不到。
+  **上游 gtceu 26.10.53 已修**（表与调用者无关 + `FluidNetHandler#fillFirst` 用 `isBackToSelf` 剔除自己）；
+  本模组等价的 D/E 两个 CoreMod 补丁已删。将来若要自己打这类补丁，判据取
+  「`getTargetPipePos().asLong() == 本管道坐标 && getTargetFacing() == 本入流面`」即可。
+- **订阅型机制退了不会自己回来**（真实缺陷，本模组暂不为它打补丁）：GTO 机器
+  （`FluidHatchPartMachine#updateTankSubscription`）与管道（`FluidPipeBlockEntity#autoTransfer`）的
+  订阅只在事件里重建，而它们的周期性任务正是被退订掉的那个。历史上试过两条路并删除：
+  管网变动时给相邻机器发方块更新（`onNetworkChanged`）、不缓存否定结果（`BlockEntityDirectionCache`
+  的 `NULL` 哨兵）、以及「条件式重新订阅」巡检（`AutoOutputReArm`，常驻登记 + 补扫，绕法不是修法）。
+  若将来遇到「邻接区块还没加载时看错一眼、之后整局那一面都瞎」的现场，上面第一条是现成方向。
+  见 `docs/pipe.md` 的「历史」一节。
 - 探针读机器状态要下钻 `MetaMachineBlockEntity.metaMachine`（`tank` / `io` / `autoIOSubs` /
   `getFrontFacing` 都在机器对象上）；管道走 AE2 键层（`IKeyHandler.insert`）而不是 Forge 能力层，
   测可收性要用前者。

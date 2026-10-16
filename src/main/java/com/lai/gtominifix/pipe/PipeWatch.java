@@ -47,6 +47,7 @@ public final class PipeWatch {
         endTick = now + (long) secs * 20L;
         nextCompact = now;
         nextFull = now;
+        PipeNetNotify.setTracing(true);
         String where = target.getX() + "," + target.getY() + "," + target.getZ() + " @ " + dim.location();
         PipeDebugLog.log("==== pipewatch 开始：" + where + "，共 " + secs + " 秒"
                 + "（每秒一行逻辑摘要 / 每 5 秒一份完整逻辑探针 + 一次退订巡视 / 开始时一份完整状态快照）====");
@@ -59,6 +60,7 @@ public final class PipeWatch {
     public static String stop() {
         boolean was = isRunning();
         endTick = -1L;
+        PipeNetNotify.setTracing(false);
         if (was) {
             PipeDebugLog.log("==== pipewatch 手动结束 ====");
         }
@@ -79,6 +81,7 @@ public final class PipeWatch {
         BlockPos p = pos;
         if (server == null || d == null || p == null) {
             endTick = -1L;
+            PipeNetNotify.setTracing(false);
             return;
         }
         ServerLevel level = server.getLevel(d);
@@ -92,6 +95,7 @@ public final class PipeWatch {
             PipeDebugLog.logLines(PipeLogicProbe.audit(level, p, AUDIT_RADIUS));
             PipeDebugLog.log("==== pipewatch 到点结束（共 " + seconds + " 秒）====");
             endTick = -1L;
+            PipeNetNotify.setTracing(false);
             return;
         }
         try {

@@ -168,11 +168,13 @@ public final class PipeProbe {
             }
         }
         out.add("    isBlocked(逐面)=" + (blocked.length() == 0 ? "六个面都没被扳手阻塞" : blocked.toString()));
-        for (Direction d : Direction.values()) {
-            Object data = call(net, "getNetData", pipeLongPos, pipePos, d);
-            Object[] routes = data == null ? null : asArray(read(data, "array"));
-            out.add("    [" + name(d) + "] 路由 " + (routes == null ? "?（读不到 array）" : routes.length + " 条"));
-        }
+        // 只读：缓存里那张表（键只有管道坐标，六面共用同一张）。
+        // 绝不能再调 getNetData —— 那会在 miss 时建表并写进缓存，把现场毁掉。
+        Object cachedTable = map == null ? null : call(map, "get", pipeLongPos);
+        Object[] cachedRoutes = cachedTable == null ? null : asArray(read(cachedTable, "array"));
+        out.add("    缓存里本管道的表=" + (cachedRoutes == null
+                ? "无（没人 insert 过，或刚被清过）"
+                : cachedRoutes.length + " 条路由（六面共用这一张：键只有管道坐标）"));
         dumpInsertDiagnosis(level, be, pos, out);
     }
 
@@ -252,9 +254,10 @@ public final class PipeProbe {
                 }
             }
         }
-        // 3) 清表前后各量一次「这根管道收不收」
-        long before = tryFill(pipe, pipeSide, source);
-        out.add("    清表前：管道收 " + before + " mB / 1000 mB" + (before == 0L ? "（拒收）" : "") + "   ← Forge 能力层，仅供参考");
+        // 3) 只读：量一次「这根管道此刻收不收」，并列出缓存里那张表的内容。
+        //    绝不写表（不调 getNetData / onPipeConnectionsUpdate / netData.clear），否则现场被毁。
+        long pipeGot = tryFill(pipe, pipeSide, source);
+        out.add("    管道此刻收 " + pipeGot + " mB / 1000 mB" + (pipeGot == 0L ? "（拒收）" : "") + "   ← Forge 能力层，仅供参考");
         Object net = unwrap(read(pipe, "net"));
         if (net == null) {
             net = unwrap(read(pipe, "currentFluidPipeNet"));
@@ -264,29 +267,25 @@ public final class PipeProbe {
             return;
         }
         Object map = read(net, "netData");
-        out.add("    路由表条目（清空前）=" + sizeOf(map));
-        call(net, "onPipeConnectionsUpdate");
-        if (map != null) {
-            call(map, "clear");
-        }
-        out.add("    路由表条目（清空后）=" + sizeOf(map));
-        long after = tryFill(pipe, pipeSide, source);
-        out.add("    清表后：管道收 " + after + " mB / 1000 mB" + (after == 0L ? "（仍拒收）" : "") + "   ← 同上，Forge 能力层");
-        // 4) 按入流面重建路由表，逐条看目标能不能收
         Object pipeLongPos = call(pipe, "getPipeLongPos");
-        Object pipeBp = call(pipe, "getPipePos");
-        Object table = pipeLongPos == null || pipeBp == null ? null
-                : call(net, "getNetData", pipeLongPos, pipeBp, pipeSide);
-        Object[] routes = table == null ? null : asArray(read(table, "array"));
-        if (routes == null) {
-            out.add("    读不到新路由表");
+        out.add("    路由表条目数=" + sizeOf(map) + "（只读）");
+        Object cached = map == null || pipeLongPos == null ? null : call(map, "get", pipeLongPos);
+        if (cached == null) {
+            out.add("    缓存表：本管道没有条目（还没人 insert 过，或被清过）→ 下一个 insert 的机器将决定这张表");
             return;
         }
+        Object[] routes = asArray(read(cached, "array"));
+        if (routes == null) {
+            out.add("    缓存表：读不到 array");
+            return;
+        }
+        out.add("    缓存表内容（只读，" + routes.length + " 条；键只有管道坐标 → 六面共用这一张）：");
         int accept = 0;
         int backflow = 0;
         int shown = 0;
         int filtered = 0;
-        for (Object r : routes) {
+        for (int idx = 0; idx < routes.length; idx++) {
+            Object r = routes[idx];
             if (r == null) {
                 continue;
             }
@@ -310,22 +309,21 @@ public final class PipeProbe {
             if (filters != null && !pass) {
                 filtered++;
             }
-            if (shown < 10) {
-                out.add("      #" + shown + " → " + targetBp.toShortString() + " 面=" + name(dir)
+            if (shown < 12) {
+                out.add("      [" + idx + "] → " + targetBp.toShortString() + " 面=" + name(dir)
                         + " 类=" + (target == null ? "无方块实体" : target.getClass().getSimpleName())
-                        + (targetBp.equals(sourcePos) ? "（回流：指向源机器自身）" : "")
+                        + (targetBp.equals(sourcePos) ? "  ★回流：指向源方块自己" : "")
                         + " 过滤=" + (filters == null ? "无" : (verdict == null ? "?" : (pass ? "通过" : "拒绝")))
                         + " 目标盖板=" + coverText(coverAt(level, targetBp, dir.getOpposite()))
                         + " 收=" + (got < 0L ? "无能力" : got + "mB"));
                 shown++;
             }
         }
-        out.add("    新表 " + routes.length + " 条路由：目标能收 1000mB 的 " + accept
-                + " 条，过滤谓词拒绝的 " + filtered + " 条，回流路由 " + backflow + " 条");
-        out.add("    判读（注意：以上「能收」都是在 Forge 能力层量的，GTO 机器真正的路径是 AE2 键层，"
-                + "以 /gtominifix pipetrace 的 handler.insert 数字为准）："
-                + "清表前0→清表后>0 ＝ 缓存路由表；清表后仍0 且可收>0 ＝ 过滤谓词(matchesFilters)挡的；"
-                + "可收=0 ＝ 目标都满/没能力；有回流且它排在前面 ＝ 流体被推回源机器自己");
+        out.add("    缓存表小结：" + routes.length + " 条路由，目标能收 1000mB 的 " + accept
+                + " 条，过滤谓词拒绝的 " + filtered + " 条，指向源方块自己的（回流）" + backflow + " 条");
+        out.add("    判读（「能收」在 Forge 能力层量的；GTO 机器真正的路径是 AE2 键层，以 /gtominifix pipetrace 的 handler.insert 数字为准）："
+                + "缓存表里出现源方块自己且排在前几条 ＝ 自吃（源机器的流体出门又回自己缸、把配额吃满）；"
+                + "缓存表里没有源方块 ＝ 这张表是它自己建的（正常）；可收=0 ＝ 目标都满/没能力");
     }
 
     /**
@@ -413,11 +411,11 @@ public final class PipeProbe {
     }
 
     /**
-     * 两个 CoreMod 补丁（A 邻居缓存 / B 网络通知）是否生效：看它们各自的存活计数。
-     * 比翻日志可靠：CoreMod 的 JS 里写不了文件，{@code print()} 也只进启动器控制台。
+     * 本模组管道侧的状态：只剩两个观察点，监听默认关（{@code /gtominifix pipewatch} 打开）。
+     * 不能靠 CoreMod 自己的日志确认：JS 里写不了文件，{@code print()} 也只进启动器控制台。
      */
     private static String coremodStatus() {
-        return "CoreMod: " + PipeNetNotify.statusText();
+        return "监听: " + PipeNetNotify.statusText();
     }
 
     /** 一行摘要，给 {@link PipeWatch} 逐秒记录用：只保留「卡住时会变」的那几个量。 */
@@ -458,15 +456,14 @@ public final class PipeProbe {
             sb.append(" autoIOSubs=").append(read(host, "autoIOSubs") == null ? "null!" : "on");
             Object net = unwrap(read(be, "net"));
             if (net != null) {
+                // 只读缓存里那张表：绝不调 getNetData（那会建表写缓存，把现场毁掉）
                 Object plp = call(be, "getPipeLongPos");
-                Object pp = call(be, "getPipePos");
+                Object map = read(net, "netData");
+                Object table = map == null || plp == null ? null : call(map, "get", plp);
+                Object[] arr = table == null ? null : asArray(read(table, "array"));
                 int routes = 0;
                 int dead = 0;
-                for (Direction d : Direction.values()) {
-                    Object[] arr = asArray(read(call(net, "getNetData", plp, pp, d), "array"));
-                    if (arr == null) {
-                        continue;
-                    }
+                if (arr != null) {
                     for (Object r : arr) {
                         routes++;
                         if (call(r, "getHandler", level) == null) {
@@ -474,7 +471,8 @@ public final class PipeProbe {
                         }
                     }
                 }
-                sb.append(" 路由=").append(routes).append(" handler为null=").append(dead)
+                sb.append(" 缓存表=").append(arr == null ? "无" : routes + "条")
+                        .append(" handler为null=").append(dead)
                         .append(" transferred=").append(read(be, "transferredFluids"));
             }
             return sb.toString();
@@ -635,7 +633,7 @@ public final class PipeProbe {
         }
     }
 
-    private static Object aeKeyTypeFluids() {
+    static Object aeKeyTypeFluids() {
         try {
             return Class.forName("appeng.api.stacks.AEKeyTypes").getField("FLUIDS").get(null);
         } catch (Throwable t) {
@@ -643,7 +641,7 @@ public final class PipeProbe {
         }
     }
 
-    private static Object storageAccess(String constant) {
+    static Object storageAccess(String constant) {
         try {
             Class<?> c = Class.forName("appeng.api.storage.StorageAccess");
             if (c.isEnum()) {
@@ -687,7 +685,7 @@ public final class PipeProbe {
         return o instanceof WeakReference<?> ref ? ref.get() : o;
     }
 
-    private static Object[] asArray(Object o) {
+    static Object[] asArray(Object o) {
         return o instanceof Object[] arr ? arr : null;
     }
 
